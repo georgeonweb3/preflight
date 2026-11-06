@@ -1,0 +1,136 @@
+# Preflight
+
+**Check before you sign. Guard before your agent spends.**
+
+Somebody drops a "free mint" link in the group chat. The site says open,
+the price says zero, the vibes say hurry. Ten minutes later your wallet
+is paying for a contract nobody could read, in a drop that sold out
+yesterday. Preflight exists so that story ends at the check, not at the
+signature.
+
+Paste a contract address or a project link. Preflight reads the chain
+and tells you, in plain words: **CLEAR**, **CAUTION** or **BLOCKED**,
+with every reason listed. It never signs anything. It never asks for a
+key. It just reads, checks, and shows its work.
+
+## Real output (BNB JIAYOU minter, checked live)
+
+This contract's own page said the first share was free, and its
+open-status flag still reads `True` today. Here is what Preflight found
+(trimmed, full output in [examples/](examples/)):
+
+```text
+Contract   0xc9b4d42abe8966496aa68a736938bf2d508f7a91
+Source     Sourcify: none
+Open       mintOpen()=True
+Simulate   mint(uint256) @ 0 BNB -> REVERT - execution reverted: 0x
+Simulate   mint(address,uint256) @ 0 BNB -> REVERT - execution reverted: 0x
+------------------------------------------------------------------------
+VERDICT    BLOCKED
+  [BLOCK] every mint/claim function reverted in eth_call simulation.
+          Closed, sold out, ineligible wallet or wrong parameters are
+          all possible - do not sign blind
+  [BLOCK] source code is NOT verified and the mint simulation reverts.
+          Nothing about this contract can be trusted
+  [WARN ] source code is NOT verified on Sourcify - nobody outside the
+          project can read what this contract does
+```
+
+Flag says open. Price looked free. Still blocked, for reasons that were
+all sitting on-chain, free to read. That is the whole point.
+
+## Install and run (under two minutes)
+
+No dependencies. Pure Python 3.9+ stdlib. Nothing to build.
+
+```bash
+git clone https://github.com/georgeonweb3/preflight.git
+cd preflight
+python3 -m preflight_core.cli check 0x28a38A372639E8C481aD41B9B16E52c3c6366ACC --chain bsc
+```
+
+Or install it as a command:
+
+```bash
+pip install .
+preflight check <contract-address-or-project-url> --chain bsc --wallet 0xYourPublicAddress
+```
+
+- `--wallet` is a public address only. It makes eligibility and the
+  simulation run as that wallet. Skip it and the check runs from the
+  zero address, which the report tells you.
+- `--json` prints the full machine-readable verdict (schema
+  `preflight.verdict/1`). `--out report.json` saves it to a file.
+- `--chain` is `bsc` today, `base` also works.
+- Exit codes: 0 = check done (BLOCKED is a successful check), 2 = the
+  input could not be resolved to a contract address, nothing guessed.
+
+## What it checks
+
+- **Deployment**: is there actually a contract there, how big, what block
+- **Proxy**: EIP-1967 upgradeable proxy detection. If the code can be
+  swapped later, you hear about it
+- **Source verification**: Sourcify match (exact, partial, none, or
+  honestly "could not check")
+- **Identity**: ERC721 / ERC1155 / token, name, symbol, owner, paused
+- **Supply**: minted vs max, how much is actually left
+- **Price**: every price function these contracts usually expose,
+  including the "free claim" fee traps (`claimFee`, `fee`, friends).
+  Price probes that disagree with each other get flagged
+- **Open status**: the usual open/active flags, cross-checked against
+  the simulation instead of trusted blindly
+- **Wallet eligibility**: holdings, minted counts, whitelist answers
+  for your wallet
+- **Simulation**: the mint/claim call itself, run as `eth_call` at
+  value 0 and at the probed price. Revert reasons included
+- **Gas**: live gas price with a band (CHEAP to VERY_EXPENSIVE on BSC),
+  a 24h baseline, and the estimated USD cost of the actual mint call
+- **History**: an experience library of past mints. If this contract, or
+  this contract shape, burned someone before, the report says so. Live
+  checks always re-run anyway
+
+## What it does NOT do
+
+- Not a wallet. It holds no keys, signs nothing, sends nothing. The RPC
+  layer refuses non-read-only methods in code.
+- Not an audit. It does not check token honeypot/tax behaviour, and a
+  CLEAR verdict is "nothing we check tripped", not "this is safe".
+- Not financial advice. It tells you what the contract looks like right
+  now. Whether to mint is still your call.
+- Simulations are best-effort. Chain state moves between the check and
+  any signature. Some mint flows (commit/reveal, off-chain signatures)
+  expose no standard mint function; Preflight says so instead of
+  faking a verdict.
+
+## Chains
+
+BSC is first-class: the probes and gas bands were calibrated on live
+mint hunting there. Base works through the same adapter shape; its gas
+bands are not calibrated yet, so you get the price without a band name.
+New chains are config, not code. PRs welcome.
+
+## Roadmap
+
+- **agent-seatbelt** (next): the same core as a gate in front of an AI
+  agent that wants to sign or spend. Proposed transaction in, verdict
+  plus policy out: spend caps, approval blocking, human-approval mode.
+- **testnet-ops** (parked): phone-first testnet workflows reusing the
+  same precheck. It ships when users of the first two doors ask for it.
+
+Full design in [SPEC.md](SPEC.md). Security model in
+[SECURITY.md](SECURITY.md).
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests
+python3 -m preflight_core.cli --selftest
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+Built by [George Agbe](https://github.com/georgeonweb3), a Web3 builder
+working from a phone in Lagos. The checks in here were learned the
+expensive way, mint by mint.
