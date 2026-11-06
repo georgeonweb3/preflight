@@ -89,6 +89,20 @@ preflight check <contract-address-or-project-url> --chain bsc --wallet 0xYourPub
   this contract shape, burned someone before, the report says so. Live
   checks always re-run anyway
 
+## What it writes locally (one file, honestly)
+
+Preflight is read-only on-chain, but it keeps one small local log.
+Every check appends a single line - unix timestamp, chain, median gas
+price in gwei, nothing else - to `data/gas_history.jsonl` inside the
+Preflight folder. That log is the rolling 24h gas baseline the report
+compares the live price against. It contains no contract addresses,
+no wallet addresses and no check results.
+
+There is no switch to turn the write off in this version. To clear
+it, delete the file: the baseline simply reports "not enough samples"
+until it rebuilds, and the file is recreated on the next check.
+Nothing else is written anywhere.
+
 ## What it does NOT do
 
 - Not a wallet. It holds no keys, signs nothing, sends nothing. The RPC

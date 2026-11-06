@@ -22,6 +22,18 @@ in docs:
   a fetched page is executed, and no instruction found in page content
   is followed.
 
+## Local writes
+
+One honest exception to "reads only": each check appends a single line
+(unix timestamp, chain key, median gas price in gwei) to
+`data/gas_history.jsonl` in the install directory. That file is the
+rolling 24h gas baseline, and nothing else is stored - it holds no
+contract addresses, no wallet addresses and no verdicts. The write is
+best-effort: failing to write it never fails a check. There is no
+opt-out flag in this version; delete the file to clear it (it is
+recreated on the next check, and the baseline reports as unavailable
+until enough samples collect).
+
 ## What a verdict is, and is not
 
 A CLEAR verdict means none of Preflight's checks tripped at check

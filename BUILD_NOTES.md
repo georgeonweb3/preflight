@@ -115,6 +115,193 @@ old code; the other 4 are guards that pass on both versions).
    on a different chain can no longer produce an exact-contract match
    (it may still ABI-shape match). `check.py` passes the chain key.
 
+## Post-review fixes, round 2 (v0.1.2, 2026-11-06)
+
+Everything from the same two-axis review that v0.1.1 deliberately
+left behind, worked through finding by finding. Dispositions for the
+items NOT fixed are recorded at the end, with reasons - same honesty
+rule as the fixes.
+
+Fixed:
+
+1. **Gas-history write disclosed** (was Standards Medium).
+   `gas.snapshot()` appends one line per check to
+   `data/gas_history.jsonl`; README.md and SECURITY.md now say exactly
+   what is written (timestamp, chain, gwei - no addresses, no
+   verdicts), where, and how to clear it (delete the file). There is
+   still no opt-out switch, and the docs now say that plainly instead
+   of letting "read-only" imply it.
+2. **UNRESOLVED_INPUT carries the full schema skeleton** (was Spec
+   Medium). The unresolved report previously omitted `checks`,
+   `library_matches` and `selector_fingerprint`. It now emits all
+   nine `checks` sections (null - nothing was probed), empty
+   `library_matches` / `selector_fingerprint`, and `contract: null`,
+   so `preflight.verdict/1` has one shape for every report. SPEC.md
+   documents this.
+3. **`totalMinted()` is probed** (was Spec Low). It sat in the
+   selector fingerprint but was never called, so contracts exposing
+   only a minted count reported supply unknown and could never be
+   SOLD_OUT. It is now a view probe and the supply fallback when
+   `totalSupply()` does not answer; the supply section records
+   `total_minted` and `total_supply_via` so the number's source is
+   never ambiguous.
+4. **`--wallet` is validated** (was Spec Low). A malformed wallet used
+   to flow straight into the check and silently degrade every
+   eligibility answer. The CLI now rejects anything that is not a
+   full 0x address before anything runs (argparse usage error,
+   exit 2).
+5. **One shape-match threshold** (was the open tail of Spec Medium
+   #6). The library admitted ABI shapes at similarity >= 0.25 while
+   the verdict surfaced them only at >= 0.5. `SHAPE_THRESHOLD = 0.5`
+   in `library.py` is now the single value used by the matcher, the
+   verdict's history reasons and check.py's identification path.
+   Below 0.5, shared boilerplate selectors are treated as no
+   relation. Note: reports therefore no longer list sub-0.5 shape
+   matches under `library_matches`. SPEC.md documents the threshold.
+6. **CLI surface documented in the spec** (was Spec Low, scope
+   creep). `--library`, `--selftest` and `--version` are deliberate
+   (the selftest is the Keccak guard from bug #1 above); SPEC.md's
+   door-1 definition now lists them instead of the code quietly
+   exceeding the spec.
+7. **Duplicated probe/call construction extracted** (was Standards
+   Medium smell, ranked fix 4). The four probe shapes in `probes.py`
+   were near-identical try/dict/decode blocks; they are now one
+   `_read` helper with the shapes as thin wrappers. `rpc.py`'s
+   eth_call / eth_estimateGas duplicated call-dict construction; both
+   now use one `_tx()` builder. Signature argument parsing lived in
+   both `abi.encode_call` and the simulation loop; `abi.arg_types`
+   is the one parser now.
+8. **Names and misplaced helpers** (was Standards Low). `verdict._r`
+   is now `_reason`; the CLI's `_W` is `_CARD_WIDTH`; check.py reuses
+   `probes.ZERO_ADDRESS` instead of a hardcoded literal; `wei_to_native`
+   moved out of `probes.py` into `abi.py` next to the other decoders
+   (still re-exported from probes for compatibility). The verdict's
+   verification if-cascade is a status -> reason lookup table.
+
+Not fixed, deliberately:
+
+- **Typed dataclasses for verdict inputs** (Standards Medium smell,
+  ranked fix 5). `evaluate()`'s inputs are the report's `checks`
+  evidence, serialised verbatim into the `preflight.verdict/1` JSON.
+  Typing them means maintaining a parallel dataclass mirror of the
+  public schema, or changing the report shape - real risk for zero
+  behaviour gain while the schema is the contract. The parts of the
+  finding with teeth (duplicated signature parsing, repeated
+  cascades) are fixed above; the dicts themselves stay, documented
+  here as a considered choice.
+- **Splitting probes.py** (Standards Low smell). Helper extraction
+  removed the duplication that made the file hurt; the module paths
+  are load-bearing (tests, BUILD_NOTES' single-job layout, pip
+  installs), and splitting deployment/supply/simulation into
+  submodules in a patch release risks more than a Low judgement-call
+  smell is worth.
+- **Speculative generality items** (Standards Low smell).
+  `eth_chainId` / `eth_getBalance` stay in the RPC allowlist because
+  SPEC.md's security model names the allowlist exactly - removing
+  them would contradict the spec, not satisfy it. `mint_method`
+  (library matches) and `cost_table_usd` (gas snapshot) stay because
+  both are fields of the emitted verdict JSON: the schema's external
+  consumers are their consumers.
+
+Tests: 62 unit tests, OK (43 at v0.1.1; +19: shape-threshold
+boundaries and threshold coherence, totalMinted fallback + primacy,
+UNRESOLVED skeleton, --wallet validation, _tx builder + allowlist
+refusal, arg_types, partial-match guard, not-a-contract card
+rendering). `--selftest` OK.
+
+Found while verifying v0.1.2 (not review findings):
+
+- The text card crashed with KeyError on a not-a-contract report:
+  `render_text` indexed every checks section directly, but probing
+  stops at the bytecode for that verdict, so most sections do not
+  exist. The card now reads sections defensively and renders for
+  every verdict shape (regression test in tests/test_cli.py).
+- KNOWN ISSUE at the time (fixed in round 3 below, same evening):
+  `probe_contract` collapses a total
+  eth_getCode transport failure (Rpc returns None after every
+  endpoint fails) into "no code", so an RPC outage can manufacture a
+  NOT_A_CONTRACT block - the deployment-probe sibling of the
+  simulation defect v0.1.1 fixed. Diagnosed 2026-11-06 when this
+  VM's egress began truncating every BSC endpoint's getCode
+  response: both live example checks degraded to NOT_A_CONTRACT
+  while eth_blockNumber still answered. The honest fix mirrors
+  SIMULATION_UNKNOWN (a DEPLOYMENT_UNKNOWN caution when the code
+  read itself failed); it changes verdict semantics, so it waits
+  for an explicit decision rather than riding along in this pass.
+  Consequence for this release's verification: the JIAYOU live
+  re-run DID complete once the egress fluctuated back - BLOCKED,
+  reasons SIMULATION_REVERTS + UNVERIFIED_AND_REVERTING +
+  UNVERIFIED_SOURCE, exactly as in v0.1.1. The ACAT re-run could
+  not be completed: its (larger) bytecode response was truncated
+  by this VM's egress on every attempt across all configured
+  endpoints, so the run kept degrading to the known issue above.
+  ACAT verdict equivalence is covered by the unit suite instead
+  (ACAT-shape verdict tests, FakeRpc end-to-end probes).
+
+## Post-review fix, round 3 (v0.1.2, 2026-11-06)
+
+The one known issue round 2 deliberately left behind, fixed the same
+evening on George's explicit go ("fix the deployment-unknown gap,
+then push"). It ships as part of v0.1.2 - the version was never
+published without it.
+
+**DEPLOYMENT_UNKNOWN.** `probe_contract` collapsed a total
+eth_getCode transport failure into "no code", so an RPC outage could
+manufacture a NOT_A_CONTRACT block - the deployment-probe sibling of
+the simulation defect v0.1.1 fixed, and a failure mode with a real
+victim on record (the Dronegent contract's false NOT_A_CONTRACT
+verdicts on 2026-11-04, from BSC RPC truncation). The deployment read
+now has three outcomes, kept distinct end to end:
+
+- bytecode present -> normal flow, unchanged;
+- a successful read that came back empty ("0x") -> genuinely not a
+  contract: NOT_A_CONTRACT block, unchanged;
+- a failed read (Rpc returns None - every endpoint down, timed out,
+  or a truncated/malformed body that never parsed; any non-string
+  result counts as malformed) -> `deployment` records
+  `code_read_failed: true` with `is_contract` and `code_size_bytes`
+  null, downstream contract-dependent probes do not run, and the
+  verdict engine emits the new DEPLOYMENT_UNKNOWN caution. The
+  verdict lands at CAUTION on deployment alone: never BLOCKED by the
+  failed read, never CLEAR through it. Absence-based readings that
+  would merely restate the failure (PRICE_UNKNOWN,
+  NO_KNOWN_MINT_FUNCTION, SIMULATION_NOT_POSSIBLE) are suppressed,
+  and the engine does not return early, so independent findings
+  still stand on their own (a sold-out supply alongside a failed
+  code read still blocks, with DEPLOYMENT_UNKNOWN named next to
+  SOLD_OUT). SPEC.md documents the three outcomes alongside
+  SIMULATION_UNKNOWN.
+
+Tests: 75 unit tests, OK (62 at the start of this round; +13:
+failed/genuine/bytecode reads at the probe level, caution-not-block
+and independent-block behaviour at the verdict level, and the RPC
+boundary itself - a truncated response body is a failed read, a
+healthy "0x" is a successful empty one). `--selftest` OK.
+
+Live verification, run the same evening under the same hostile
+egress that exposed the issue (this VM's BSC eth_getCode responses
+were still being truncated, so no full read completed):
+
+- JIAYOU minter (2 runs): CAUTION - DEPLOYMENT_UNKNOWN +
+  UNVERIFIED_SOURCE + HISTORY_EXACT_FAILURE. The historical BLOCKED
+  needs a successful code read to reproduce live and could not be
+  re-run under tonight's truncation; the blocked shape is covered
+  by the unit suite (JIAYOU-shape verdict and probe tests). What
+  matters tonight: v0.1.2 without this fix answered these same runs
+  with a false NOT_A_CONTRACT block; v0.1.2 with it answers
+  honestly that the deployment question is open.
+- ACAT (2 runs): CAUTION - DEPLOYMENT_UNKNOWN + SOURCE_VERIFIED +
+  HISTORY_EXACT_SUCCESS. Exactly the prescribed behaviour: the
+  independent evidence is favourable and is reported as such, the
+  verdict refuses to be CLEAR on an unread contract, and nothing
+  was manufactured.
+
+Pushed to github.com/georgeonweb3/preflight (main) as the v0.1.2
+snapshot on 2026-11-06; the commit SHA is recorded in the adjacent
+sync record (`~/workspace/preflight.muse-github-snapshot-sync.json`),
+not here, because a file cannot contain the hash of the commit that
+carries it.
+
 ## Cut from v1, and why
 
 - Library recording (`--record-outcome` in the skill): the library is

@@ -13,6 +13,11 @@ Conventions kept from the parent bsc-mint-precheck skill:
   transport failure, so we do not retry it on other endpoints;
 - a transport failure returns {"__error__": message} for call-like methods
   and None for simple getters after every endpoint has been tried.
+
+For eth_getCode that makes None mean "the read failed", which is a
+different fact from a successful read of an address with no code -
+that returns the string "0x". Callers must keep the two apart
+(probes.py does: DEPLOYMENT_UNKNOWN vs NOT_A_CONTRACT).
 """
 import json
 import urllib.error
@@ -29,6 +34,18 @@ READ_ONLY_METHODS = {
     "eth_getBalance",
 }
 _CALL_LIKE = {"eth_call", "eth_estimateGas"}
+
+
+def _tx(to, data, from_addr=None, value_wei=0):
+    """The one place a call object is built. It is only ever handed to
+    eth_call / eth_estimateGas - the allowlist above has no method that
+    could send it anywhere."""
+    tx = {"to": to, "data": data}
+    if from_addr:
+        tx["from"] = from_addr
+    if value_wei:
+        tx["value"] = hex(value_wei)
+    return tx
 
 
 class Rpc:
@@ -67,21 +84,11 @@ class Rpc:
         return None
 
     def eth_call(self, to, data, from_addr=None, value_wei=0):
-        tx = {"to": to, "data": data}
-        if from_addr:
-            tx["from"] = from_addr
-        if value_wei:
-            tx["value"] = hex(value_wei)
-        return self.call("eth_call", [tx, "latest"])
+        return self.call("eth_call", [_tx(to, data, from_addr, value_wei), "latest"])
 
     def estimate_gas(self, to, data, from_addr=None, value_wei=0):
         """Gas units for a call against current state, or a revert dict."""
-        tx = {"to": to, "data": data}
-        if from_addr:
-            tx["from"] = from_addr
-        if value_wei:
-            tx["value"] = hex(value_wei)
-        res = self.call("eth_estimateGas", [tx])
+        res = self.call("eth_estimateGas", [_tx(to, data, from_addr, value_wei)])
         if isinstance(res, str) and res.startswith("0x"):
             return int(res, 16)
         return res  # dict with __revert__/__error__, or None

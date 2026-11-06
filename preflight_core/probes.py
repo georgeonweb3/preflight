@@ -11,10 +11,12 @@ Everything here is eth_call / eth_getCode / eth_getStorageAt. Nothing is
 signed, nothing is sent.
 """
 from concurrent.futures import ThreadPoolExecutor
-from decimal import Decimal
 
-from .abi import dec_address, dec_bool, dec_string, dec_uint, encode_call
+from .abi import (arg_types, dec_address, dec_bool, dec_string, dec_uint,
+                  encode_call, wei_to_native)
 from .keccak import selector
+
+__all__ = ["MINT_CANDIDATES", "ZERO_ADDRESS", "probe_contract", "wei_to_native"]
 
 # (field, signature, decoder-kind)
 VIEW_PROBES = [
@@ -22,6 +24,7 @@ VIEW_PROBES = [
     ("symbol", "symbol()", "string"),
     ("decimals", "decimals()", "uint"),
     ("totalSupply", "totalSupply()", "uint"),
+    ("totalMinted", "totalMinted()", "uint"),
     ("maxSupply", "maxSupply()", "uint"),
     ("MAX_SUPPLY", "MAX_SUPPLY()", "uint"),
     ("maxTotalSupply", "maxTotalSupply()", "uint"),
@@ -68,11 +71,8 @@ EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a71785
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-
-def wei_to_native(wei) -> str:
-    if wei is None:
-        return "unknown"
-    return str((Decimal(wei) / Decimal(10 ** 18)).normalize())
+_DECODERS = {"uint": dec_uint, "bool": dec_bool,
+             "address": dec_address, "string": dec_string}
 
 
 def _fingerprint(code_hex: str):
@@ -98,15 +98,28 @@ def probe_contract(rpc, contract: str, wallet: str = None) -> dict:
         f_block = ex.submit(rpc.call, "eth_blockNumber", [])
         code, impl_raw, admin_raw, block = f_code.result(), f_impl.result(), f_admin.result(), f_block.result()
 
-    code_hex = (code or "0x")[2:]
-    is_contract = len(code_hex) > 0
+    # The code read has three outcomes and they must never be merged:
+    # bytecode (a contract), a successful read that came back empty
+    # (genuinely not a contract at this address), and a failed read -
+    # rpc.call returns None when every endpoint failed at the
+    # transport level (endpoint down, timeout, or a truncated /
+    # malformed body that never parsed), and anything that is not a
+    # string is malformed by definition. A failed read is evidence
+    # about the network, not about the address: it is recorded as
+    # code_read_failed, is_contract stays None (unknown), and the
+    # verdict engine lands it at DEPLOYMENT_UNKNOWN - the deployment
+    # sibling of SIMULATION_UNKNOWN - never at NOT_A_CONTRACT.
+    code_read_failed = not isinstance(code, str)
+    code_hex = code[2:] if isinstance(code, str) else ""
+    is_contract = None if code_read_failed else len(code_hex) > 0
     impl = dec_address(impl_raw) if impl_raw and int(impl_raw, 16) != 0 else None
     admin = dec_address(admin_raw) if admin_raw and int(admin_raw, 16) != 0 else None
     present_sigs, selector_set = _fingerprint(code_hex)
 
     deployment = {
         "is_contract": is_contract,
-        "code_size_bytes": len(code_hex) // 2,
+        "code_read_failed": code_read_failed,
+        "code_size_bytes": None if code_read_failed else len(code_hex) // 2,
         "block_at_check": int(block, 16) if block else None,
         "is_proxy_eip1967": impl is not None,
         "implementation": impl,
@@ -130,45 +143,37 @@ def probe_contract(rpc, contract: str, wallet: str = None) -> dict:
     checks["selectors"] = sorted(selector_set)
 
     # --- routine view / price / open / wallet probes, in parallel ---
+    def _read(sig, args, kind):
+        """One eth_call probe, decoded. Returns (value, error): a
+        revert, a transport failure and an empty answer all come back
+        as value None with the reason carried in error. Every probe
+        shape below is this single read with different arguments."""
+        try:
+            res = rpc.eth_call(contract, encode_call(sig, args))
+        except Exception as e:
+            return None, str(e)
+        if isinstance(res, dict):
+            return None, res.get("__revert__") or res.get("__error__")
+        if res in (None, "0x"):
+            return None, "empty"
+        return _DECODERS[kind](res), None
+
     def probe_view(item):
         field, sig, kind = item
-        try:
-            res = rpc.eth_call(contract, encode_call(sig, []))
-        except Exception as e:
-            return field, None, str(e)
-        if isinstance(res, dict):
-            return field, None, res.get("__revert__") or res.get("__error__")
-        if res in (None, "0x"):
-            return field, None, "empty"
-        dec = {"uint": dec_uint, "bool": dec_bool, "address": dec_address, "string": dec_string}[kind]
-        return field, dec(res), None
+        val, err = _read(sig, [], kind)
+        return field, val, err
 
     def probe_uint(sig):
-        try:
-            res = rpc.eth_call(contract, encode_call(sig, []))
-        except Exception:
-            return sig, None
-        if isinstance(res, dict) or res in (None, "0x"):
-            return sig, None
-        return sig, dec_uint(res)
+        val, _ = _read(sig, [], "uint")
+        return sig, val
 
     def probe_bool(sig):
-        try:
-            res = rpc.eth_call(contract, encode_call(sig, []))
-        except Exception:
-            return sig, None
-        if isinstance(res, dict) or res in (None, "0x"):
-            return sig, None
-        return sig, dec_bool(res)
+        val, _ = _read(sig, [], "bool")
+        return sig, val
 
     def probe_wallet(sig, kind):
-        try:
-            res = rpc.eth_call(contract, encode_call(sig, [wallet]))
-        except Exception:
-            return sig, None
-        if isinstance(res, dict) or res in (None, "0x"):
-            return sig, None
-        return sig, (dec_bool(res) if kind == "bool" else dec_uint(res))
+        val, _ = _read(sig, [wallet], kind)
+        return sig, val
 
     views, prices, opens, wallet_info, ifaces = {}, {}, {}, {}, {}
     with ThreadPoolExecutor(max_workers=10) as ex:
@@ -232,11 +237,24 @@ def probe_contract(rpc, contract: str, wallet: str = None) -> dict:
     max_supply = views.get("maxSupply") or views.get("MAX_SUPPLY") or \
         views.get("maxTotalSupply") or views.get("collectionSize")
     total_supply = views.get("totalSupply")
+    total_minted = views.get("totalMinted")
+    # Some contracts expose only totalMinted() - no totalSupply() at
+    # all. The minted count is then the supply evidence: sold-out can
+    # still be judged instead of the supply section going unknown.
+    # total_supply_via records which function the number came from.
+    if total_supply is not None:
+        total_supply_via = "totalSupply()"
+    elif total_minted is not None:
+        total_supply, total_supply_via = total_minted, "totalMinted()"
+    else:
+        total_supply_via = None
     remaining = None
     if max_supply is not None and total_supply is not None:
         remaining = max_supply - total_supply
     checks["supply"] = {
-        "total_supply": total_supply, "max_supply": max_supply, "remaining": remaining,
+        "total_supply": total_supply, "total_minted": total_minted,
+        "total_supply_via": total_supply_via,
+        "max_supply": max_supply, "remaining": remaining,
     }
 
     # --- price: first answering probe in table order wins; disagreement is data ---
@@ -273,8 +291,7 @@ def probe_contract(rpc, contract: str, wallet: str = None) -> dict:
     sims = []
     candidates = [s for s in MINT_CANDIDATES if selector(s) in selector_set]
     for sig in candidates:
-        inner = sig[sig.index("(") + 1:sig.rindex(")")]
-        types = inner.split(",") if inner else []
+        types = arg_types(sig)
         args, ok_args = [], True
         for t in types:
             if t == "uint256":

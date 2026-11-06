@@ -100,6 +100,12 @@ class TestVerdict(unittest.TestCase):
         self.assertEqual(verdict, "CAUTION")
         self.assertIn("NO_KNOWN_MINT_FUNCTION", codes(reasons))
 
+    def test_partial_match_is_info_not_caution(self):
+        verdict, reasons = evaluate(base_checks(),
+                                    {"status": "partial_match"}, [], CHEAP_GAS)
+        self.assertEqual(verdict, "CLEAR")
+        self.assertIn("SOURCE_VERIFIED_PARTIAL", codes(reasons))
+
     def test_exact_history_failure_is_caution(self):
         matches = [{"project": "OldDrop", "similarity": 1.0,
                     "match_type": "exact_contract", "outcome": "sold_out",
@@ -144,6 +150,58 @@ class TestSimulationEvidence(unittest.TestCase):
         self.assertEqual(verdict, "CAUTION")
         self.assertNotIn("SIMULATION_REVERTS", codes(reasons))
         self.assertIn("SIMULATION_UNKNOWN", codes(reasons))
+
+
+class TestDeploymentEvidence(unittest.TestCase):
+    """Regression tests for the DEPLOYMENT_UNKNOWN fix (2026-11-06):
+    a failed eth_getCode read (transport failure / truncation) is a
+    caution that decides nothing on its own - it can neither
+    manufacture a NOT_A_CONTRACT block nor soften an independent one."""
+
+    def _unknown_checks(self):
+        # What probe_contract emits when the code read failed: a
+        # deployment section carrying the failure, and no
+        # contract-dependent sections at all.
+        return {"deployment": {"is_contract": None, "code_read_failed": True,
+                               "is_proxy_eip1967": False, "implementation": None}}
+
+    def test_deployment_unknown_is_caution_not_block(self):
+        verdict, reasons = evaluate(self._unknown_checks(), VERIFIED, [], CHEAP_GAS)
+        self.assertEqual(verdict, "CAUTION")
+        self.assertIn("DEPLOYMENT_UNKNOWN", codes(reasons))
+        self.assertNotIn("NOT_A_CONTRACT", codes(reasons))
+
+    def test_deployment_unknown_suppresses_absence_readings(self):
+        # With the bytecode never read, "no price answered" and "no
+        # mint function found" would only restate the failure - the
+        # absence of evidence must not be dressed up as two more
+        # contract facts next to it.
+        _, reasons = evaluate(self._unknown_checks(), VERIFIED, [], CHEAP_GAS)
+        self.assertNotIn("PRICE_UNKNOWN", codes(reasons))
+        self.assertNotIn("NO_KNOWN_MINT_FUNCTION", codes(reasons))
+        self.assertNotIn("SIMULATION_NOT_POSSIBLE", codes(reasons))
+
+    def test_deployment_unknown_does_not_mask_an_independent_block(self):
+        checks = self._unknown_checks()
+        checks["supply"] = {"total_supply": 100, "max_supply": 100, "remaining": 0}
+        verdict, reasons = evaluate(checks, VERIFIED, [], CHEAP_GAS)
+        self.assertEqual(verdict, "BLOCKED")
+        self.assertIn("SOLD_OUT", codes(reasons))
+        self.assertIn("DEPLOYMENT_UNKNOWN", codes(reasons))
+
+    def test_genuine_empty_read_still_blocks(self):
+        checks = base_checks()
+        checks["deployment"] = {"is_contract": False, "code_read_failed": False,
+                                "is_proxy_eip1967": False, "implementation": None}
+        verdict, reasons = evaluate(checks, {"status": "unknown"}, [], {})
+        self.assertEqual(verdict, "BLOCKED")
+        self.assertIn("NOT_A_CONTRACT", codes(reasons))
+        self.assertNotIn("DEPLOYMENT_UNKNOWN", codes(reasons))
+
+    def test_clean_read_has_no_deployment_unknown(self):
+        verdict, reasons = evaluate(base_checks(), VERIFIED, [], CHEAP_GAS)
+        self.assertEqual(verdict, "CLEAR")
+        self.assertNotIn("DEPLOYMENT_UNKNOWN", codes(reasons))
 
 
 class TestHistoryClassification(unittest.TestCase):

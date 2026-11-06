@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from . import __version__
 from .chains import CHAINS
 from .gas import estimate_call_cost, snapshot as gas_snapshot
-from .library import load_library, match_library
-from .probes import probe_contract
+from .library import SHAPE_THRESHOLD, load_library, match_library
+from .probes import ZERO_ADDRESS, probe_contract
 from .resolve import resolve_input
 from .rpc import Rpc
 from .sourcify import check_verification
@@ -67,6 +67,17 @@ def run_check(target, chain_key="bsc", wallet=None, library_path=None):
             "code": "UNRESOLVED_INPUT", "level": "block",
             "message": f"could not resolve a contract address from the input ({note}) - nothing was guessed",
         }]
+        # The verdict schema (preflight.verdict/1) has one shape for
+        # every report, resolved or not: an unresolved report carries
+        # the full skeleton with the evidence sections null (nothing
+        # was probed) and the match/fingerprint lists empty, so a
+        # consumer never has to guess which keys exist.
+        report["contract"] = None
+        report["checks"] = {k: None for k in (
+            "deployment", "verification", "identity", "supply", "price",
+            "open_status", "wallet", "simulation", "gas")}
+        report["library_matches"] = []
+        report["selector_fingerprint"] = []
         report["timings_seconds"] = timer.steps
         report["total_seconds"] = round(time.perf_counter() - t0, 3)
         return report, 2
@@ -97,7 +108,7 @@ def run_check(target, chain_key="bsc", wallet=None, library_path=None):
     if winning:
         mint_estimate = estimate_call_cost(
             chain, rpc, contract, winning["calldata"],
-            wallet or "0x0000000000000000000000000000000000000000",
+            wallet or ZERO_ADDRESS,
             winning["value_wei"], snap=snap)
     checks["gas"] = {"snapshot": snap, "mint_estimate": mint_estimate}
     timer.stop()
@@ -111,7 +122,7 @@ def run_check(target, chain_key="bsc", wallet=None, library_path=None):
     report["identification_path"] = (
         f"known shape: '{best['project']}' (similarity {best['similarity']}, {best['match_type']}) - "
         "address, price and parameters were still re-verified live in this run"
-        if best and best["similarity"] >= 0.5 else
+        if best and best["similarity"] >= SHAPE_THRESHOLD else
         "unfamiliar contract shape - read the reasons carefully, this is where human judgement earns its keep")
     timer.stop()
 

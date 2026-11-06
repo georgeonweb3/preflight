@@ -59,9 +59,23 @@ signing. Nobody assembles it into one answer. Preflight does.
 - **Probing** (`probes.py`): a fixed battery of read-only eth_call
   probes run in parallel - deployment and code size, EIP-1967 proxy
   detection (identification follows the implementation), identity
-  (ERC-165 type, name, symbol, owner, paused), supply vs max supply,
-  a table of known price functions, a table of open-status functions,
-  wallet eligibility (holdings, minted counts, whitelist flags).
+  (ERC-165 type, name, symbol, owner, paused), supply vs max supply
+  (`totalSupply()`, falling back to `totalMinted()` for contracts that
+  expose only the minted count, so sold-out is still judged and the
+  report records which function the number came from), a table of
+  known price functions, a table of open-status functions, wallet
+  eligibility (holdings, minted counts, whitelist flags). The
+  deployment read itself has three outcomes, kept distinct like the
+  simulation outcomes below: bytecode present; a successful read that
+  came back empty (genuinely not a contract - a block); and a failed
+  read (every endpoint failed, timed out, or returned a truncated or
+  malformed body). A failed read is evidence about the network, not
+  about the address: the deployment section records it
+  (`code_read_failed`, with `is_contract` null), downstream probes do
+  not run, and the verdict surfaces it as the DEPLOYMENT_UNKNOWN
+  caution - it can neither manufacture a NOT_A_CONTRACT block nor
+  clear one, and independent findings are still evaluated on their
+  own.
 - **Simulation** (`probes.py`): every known mint/claim function found
   in the bytecode is eth_call'd from the check wallet, first at value
   0 and, when a price was probed, again at value = price. Revert
@@ -83,14 +97,21 @@ signing. Nobody assembles it into one answer. Preflight does.
   unverified".
 - **Gas** (`gas.py`): median eth_gasPrice across endpoints, BSC band
   (CHEAP / NORMAL / EXPENSIVE / VERY_EXPENSIVE), rolling 24h local
-  baseline, native-token USD price, and an eth_estimateGas cost for
-  the exact mint call when a simulation succeeded.
+  baseline (samples are appended to `data/gas_history.jsonl` - the
+  one local write the tool makes, disclosed in SECURITY.md),
+  native-token USD price, and an eth_estimateGas cost for the exact
+  mint call when a simulation succeeded.
 - **Experience library** (`library.py`): past outcomes as JSONL,
   matched exact-contract first, then by ABI shape (Jaccard over the
   selector fingerprint). Exact-contract matching is chain-scoped: the
   same address on a different chain is a different contract and does
-  not inherit this chain's history. A match surfaces history ("this
-  shape failed before, here is why") but never skips a live check.
+  not inherit this chain's history. A selector shape counts as a
+  match at Jaccard similarity >= 0.5 - one threshold (`SHAPE_THRESHOLD`
+  in `library.py`), used by the matcher, the verdict's history
+  reasons and the identification path alike; below it, two contracts
+  merely sharing boilerplate selectors are treated as unrelated. A
+  match surfaces history ("this shape failed before, here is why")
+  but never skips a live check.
 - **Verdict engine** (`verdict.py`): a pure function from checks to
   verdict + itemised reasons. Deterministic and unit-tested.
 
@@ -106,13 +127,22 @@ Every check emits the same JSON shape, whoever ran it:
   open_status, wallet, simulation, gas - the raw evidence.
 - `library_matches`, `selector_fingerprint`, per-step `timings_seconds`.
 
-Block rules (v1): no contract code; supply exhausted; contract paused;
+An UNRESOLVED_INPUT report carries the same skeleton: the `checks`
+sections are present but null (nothing was probed), `library_matches`
+and `selector_fingerprint` are empty lists, and `contract` is null.
+The shape never changes, so a consumer never has to guess which keys
+exist.
+
+Block rules (v1): no contract code (on a successful code read);
+supply exhausted; contract paused;
 every simulation reverted; open-status probes unanimously closed with
 no successful simulation; source unverified AND simulation reverting.
 Caution rules include: unverified or unchecked source, upgradeable
 proxy, any price above zero (amount shown), disagreeing price probes,
 unknown price, no known mint function (commit/reveal shapes), open
-status unconfirmed, simulation not completed (RPC/transport failure),
+status unconfirmed, deployment not checked (the eth_getCode read
+itself failed in transport - DEPLOYMENT_UNKNOWN), simulation not
+completed (RPC/transport failure),
 expensive gas, whitelist answering false, a matching past failure in
 the experience library (exact contract or matching ABI shape).
 
@@ -121,6 +151,12 @@ the experience library (exact contract or matching ABI shape).
 1. **mint-precheck (built, v1)** - the CLI in this repo:
    `preflight check <address-or-url> --chain bsc [--wallet 0x...]`,
    human card on stdout, `--json` for the schema, `--out` to save it.
+   `--wallet` must be a full 0x address and is validated before
+   anything runs (a malformed wallet is a usage error, not a silently
+   degraded report). `--library <path>` swaps in a different
+   experience-library file. Two utility flags live on the top-level
+   command: `--selftest` (verify the built-in Keccak-256 and exit)
+   and `--version`.
 2. **agent-seatbelt (next, spec only)** - the same core wrapped as a
    gate in front of an AI agent's signing/spending step. Input is a
    proposed transaction instead of a pasted link; the core adds policy

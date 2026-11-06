@@ -7,7 +7,25 @@ pulling one in would break the zero-dependency rule.
 
 Adapted from George's bsc-mint-precheck skill (same author).
 """
+from decimal import Decimal
+
 from .keccak import selector
+
+
+def arg_types(sig: str) -> list:
+    """The argument types of a signature: "mint(address,uint256)" ->
+    ["address", "uint256"], "mint()" -> []. The one place signature
+    parsing lives - encoding and simulation both use it."""
+    inner = sig[sig.index("(") + 1:sig.rindex(")")] if "(" in sig else ""
+    return inner.split(",") if inner else []
+
+
+def wei_to_native(wei) -> str:
+    """Format a wei amount as a native-token decimal string, or
+    "unknown" when the amount itself is unknown."""
+    if wei is None:
+        return "unknown"
+    return str((Decimal(wei) / Decimal(10 ** 18)).normalize())
 
 
 def enc_uint(v: int) -> str:
@@ -29,8 +47,7 @@ def enc_bytes4(hex4: str) -> str:
 
 def encode_call(sig: str, args: list) -> str:
     """Encode a function call as 0x-prefixed calldata hex."""
-    inner = sig[sig.index("(") + 1:sig.rindex(")")] if "(" in sig else ""
-    types = inner.split(",") if inner else []
+    types = arg_types(sig)
     data = selector(sig)
     for t, v in zip(types, args):
         if t == "address":

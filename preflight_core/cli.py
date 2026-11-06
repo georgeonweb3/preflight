@@ -17,8 +17,9 @@ from . import __version__
 from .chains import CHAINS
 from .check import run_check
 from .keccak import selftest as keccak_selftest
+from .resolve import ADDR_RE
 
-_W = 72
+_CARD_WIDTH = 72
 
 
 def _short(addr, head=10, tail=6):
@@ -36,61 +37,67 @@ def _fmt_supply(s):
 
 def render_text(r: dict) -> str:
     chain = r["chain"]
-    lines = ["=" * _W,
+    lines = ["=" * _CARD_WIDTH,
              f"PREFLIGHT v{r['version']} · {chain['name']} · read-only: nothing signed, nothing sent",
-             "=" * _W]
+             "=" * _CARD_WIDTH]
     res = r.get("resolution", {})
     lines.append(f"Contract   {res.get('contract') or '(unresolved)'}")
     lines.append(f"           ({res.get('note')})")
     if r["verdict"] == "UNRESOLVED_INPUT":
-        lines.append("-" * _W)
+        lines.append("-" * _CARD_WIDTH)
         lines.append("VERDICT    UNRESOLVED_INPUT")
         for reason in r.get("reasons", []):
             lines.append(f"  - {reason['message']}")
-        lines.append("=" * _W)
+        lines.append("=" * _CARD_WIDTH)
         return "\n".join(lines)
 
+    # A not-a-contract report legitimately carries only the sections
+    # that ran (deployment / verification / gas) - probing stops at
+    # the bytecode. Every section below is therefore read defensively;
+    # the card must render for that verdict too, not crash on it.
     c = r["checks"]
-    ident, ver = c["identity"], c["verification"]
+    ident = c.get("identity") or {}
+    ver = c.get("verification") or {"status": "unknown"}
     name = ident.get("name") or "unknown name"
     sym = f" (${ident.get('symbol')})" if ident.get("symbol") else ""
     lines.append(f"Identity   {name}{sym} · {ident.get('type')}")
-    lines.append(f"Source     Sourcify: {ver['status'].replace('_', ' ')}")
-    dep = c["deployment"]
+    lines.append(f"Source     Sourcify: {ver.get('status', 'unknown').replace('_', ' ')}")
+    dep = c.get("deployment") or {}
     if dep.get("is_proxy_eip1967"):
         lines.append(f"Proxy      yes · implementation {_short(dep.get('implementation'))}")
-    price = c["price"]
+    price = c.get("price") or {}
     if price.get("wei") is None:
         lines.append("Price      unknown (no price function answered)")
     elif price["wei"] == 0:
         lines.append(f"Price      0 {chain['native_symbol']} via {price.get('via_function')} - free, gas only")
     else:
         lines.append(f"Price      {price['native']} {chain['native_symbol']} via {price.get('via_function')}")
-    lines.append(f"Supply     {_fmt_supply(c['supply'])}")
-    opens = c["open_status"].get("probes") or {}
+    lines.append(f"Supply     {_fmt_supply(c.get('supply') or {})}")
+    opens = (c.get("open_status") or {}).get("probes") or {}
     if opens:
         shown = ", ".join(f"{k}={v}" for k, v in opens.items())
         lines.append(f"Open       {shown}")
     else:
         lines.append("Open       no open-status function answered")
-    w = c["wallet"]
+    w = c.get("wallet") or {}
     if r.get("wallet"):
         holds = w.get("balance_of")
         bits = [f"holds {holds if holds is not None else 'unknown'}"]
         if w.get("minted_counts"):
             bits.append("minted " + ", ".join(f"{k}={v}" for k, v in w["minted_counts"].items()))
         lines.append(f"Wallet     {_short(r['wallet'])} · " + " · ".join(bits))
-    sim = c["simulation"]
-    if sim["attempts"]:
+    sim = c.get("simulation") or {}
+    if sim.get("attempts"):
         for a in sim["attempts"]:
             extra = f" - {a['reason']}" if a.get("reason") else ""
             lines.append(f"Simulate   {a['function']} @ {a['value_native']} {chain['native_symbol']} -> {a['result'].upper()}{extra}")
-    else:
+    elif "simulation" in c:
         lines.append("Simulate   no known mint/claim function to simulate")
-    gas = c["gas"]["snapshot"]
+    gas_section = c.get("gas") or {}
+    gas = gas_section.get("snapshot") or {}
     if gas.get("ok"):
         band = gas.get("band") or "band n/a"
-        est = c["gas"].get("mint_estimate") or {}
+        est = gas_section.get("mint_estimate") or {}
         est_txt = ""
         if est.get("ok") and est.get("est_cost_usd") is not None:
             est_txt = f" · est. mint cost ${est['est_cost_usd']:.4f} ({est['gas_units']} gas units)"
@@ -100,16 +107,16 @@ def render_text(r: dict) -> str:
         lines.append(f"Gas        {gas['gwei_median']} gwei · {band}{price_txt}{est_txt}")
     else:
         lines.append("Gas        snapshot unavailable")
-    lines.append("-" * _W)
+    lines.append("-" * _CARD_WIDTH)
     lines.append(f"VERDICT    {r['verdict']}")
     tag = {"block": "BLOCK", "caution": "WARN ", "info": " ok  "}
     for reason in r["reasons"]:
         lines.append(f"  [{tag.get(reason['level'], '?????')}] {reason['message']}")
-    lines.append("-" * _W)
+    lines.append("-" * _CARD_WIDTH)
     lines.append(f"History    {r.get('identification_path')}")
     block = dep.get("block_at_check")
     lines.append(f"Time       {r.get('total_seconds')}s" + (f" · block {block}" if block else ""))
-    lines.append("=" * _W)
+    lines.append("=" * _CARD_WIDTH)
     return "\n".join(lines)
 
 
@@ -138,6 +145,11 @@ def main(argv=None):
     if args.cmd != "check":
         ap.print_help()
         return 0
+
+    if args.wallet is not None and not ADDR_RE.fullmatch(args.wallet):
+        # A malformed wallet would silently degrade every eligibility
+        # answer in the report - fail loudly before anything runs.
+        ap.error(f"--wallet must be a full address (0x + 40 hex chars), got {args.wallet!r}")
 
     report, code = run_check(args.target, chain_key=args.chain,
                              wallet=args.wallet, library_path=args.library)
