@@ -58,10 +58,12 @@ preflight check <contract-address-or-project-url> --chain bsc --wallet 0xYourPub
 
 - `--wallet` is a public address only. It makes eligibility and the
   simulation run as that wallet. Skip it and the check runs from the
-  zero address, which the report tells you.
+  zero address, which the report tells you. (On Solana it simply
+  reports that wallet's balance of the mint.)
 - `--json` prints the full machine-readable verdict (schema
   `preflight.verdict/1`). `--out report.json` saves it to a file.
-- `--chain` is `bsc` today, `base` also works.
+- `--chain` is `bsc` today; `base` and `solana` also work. On Solana
+  the target is a token mint address (base58) - see Chains below.
 - Exit codes: 0 = check done (BLOCKED is a successful check), 2 = the
   input could not be resolved to a contract address, nothing guessed.
 
@@ -121,7 +123,24 @@ Nothing else is written anywhere.
 BSC is first-class: the probes and gas bands were calibrated on live
 mint hunting there. Base works through the same adapter shape; its gas
 bands are not calibrated yet, so you get the price without a band name.
-New chains are config, not code. PRs welcome.
+New EVM chains are config, not code. PRs welcome.
+
+Solana (`--chain solana`) is its own adapter, because nothing about
+the EVM pipeline applies there: no source verification, no eth_call.
+The check takes a mint address and reads it three ways - direct RPC
+(mint and freeze authorities, supply, Token-2022 extensions such as
+transfer fees/hooks and permanent delegates), holder concentration
+(largest accounts, with GoPlus and RugCheck holder tables as
+fallbacks), plus the RugCheck risk report and the GoPlus Solana token
+security entry as cross-checks. The verdict words are the same -
+CLEAR / CAUTION / BLOCKED - and the honesty rule is the same: a
+source that does not answer is reported as a gap and caps the verdict
+at CAUTION, never read as a pass. A live freeze authority is treated
+as the Solana honeypot equivalent; live authorities on their own are
+cautions (legitimate issuers like USDC keep them), and they escalate
+to BLOCKED only with corroboration - a RugCheck danger risk, an
+extreme holder concentration, or both authorities over a concentrated
+base.
 
 ## Roadmap
 

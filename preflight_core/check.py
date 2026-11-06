@@ -43,6 +43,13 @@ class _Timer:
 def run_check(target, chain_key="bsc", wallet=None, library_path=None):
     """Returns (report_dict, exit_code). Exit 2 = input unresolved."""
     chain = CHAINS[chain_key]
+    if chain.kind == "solana":
+        # Different account model: the EVM stages below (eth_call
+        # probes, Sourcify, gas bands, selector fingerprints) do not
+        # exist there. The Solana pipeline returns the same report
+        # shape with those sections null.
+        from .solana_check import run_solana_check
+        return run_solana_check(target, chain, wallet=wallet)
     timer = _Timer()
     t0 = time.perf_counter()
     report = {

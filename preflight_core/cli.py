@@ -18,6 +18,7 @@ from .chains import CHAINS
 from .check import run_check
 from .keccak import selftest as keccak_selftest
 from .resolve import ADDR_RE
+from .solana import is_solana_address
 
 _CARD_WIDTH = 72
 
@@ -35,6 +36,84 @@ def _fmt_supply(s):
             f"remaining {s.get('remaining')}")
 
 
+def _fmt_ui_amount(ui, decimals):
+    if ui is None:
+        return "unknown"
+    return f"{ui:,.{min(decimals or 0, 6)}f}"
+
+
+def _solana_card_lines(r: dict) -> list:
+    """The Solana report card: same skeleton as the EVM card (header
+    and Contract lines are already emitted by render_text), with the
+    questions that exist on Solana - authorities, holder
+    concentration, and the two public safety reports."""
+    c = r["checks"]
+    ident = c.get("identity") or {}
+    sol = c.get("solana") or {}
+    dep = c.get("deployment") or {}
+    lines = []
+    name = ident.get("name") or "unknown name"
+    sym = f" (${ident.get('symbol')})" if ident.get("symbol") else ""
+    lines.append(f"Identity   {name}{sym} · {ident.get('type') or 'unknown program'}")
+    supply = c.get("supply") or {}
+    if supply.get("total_supply") is None:
+        if dep.get("status") == "not_found":
+            lines.append("Supply     unknown (no account exists at this address)")
+        elif dep.get("status") == "not_a_mint":
+            lines.append("Supply     unknown (account exists but is not a token mint)")
+        else:
+            lines.append("Supply     unknown (the mint read did not answer)")
+    else:
+        lines.append(f"Supply     {_fmt_ui_amount(supply.get('supply_ui'), supply.get('decimals'))} · {supply.get('decimals')} decimals")
+    auth = sol.get("authorities") or {}
+    if dep.get("status") == "ok":
+        if auth.get("mint_authority"):
+            lines.append(f"Mint auth  STILL SET: {_short(auth['mint_authority'], 8, 6)} - new supply can be minted")
+        else:
+            lines.append("Mint auth  revoked - supply is fixed")
+        if auth.get("freeze_authority"):
+            lines.append(f"Freeze     STILL SET: {_short(auth['freeze_authority'], 8, 6)} - holders can be frozen in place")
+        else:
+            lines.append("Freeze     revoked - holders cannot be frozen")
+    exts = sol.get("extensions") or []
+    if exts:
+        lines.append("Extensions " + ", ".join(e.get("name") or "?" for e in exts))
+    holders = sol.get("holders") or {}
+    if holders.get("status") == "ok":
+        lines.append(f"Holders    top account {holders.get('top1_pct')}% · top 10 {holders.get('top10_pct')}% of supply (via {holders.get('source')})")
+    else:
+        lines.append("Holders    concentration unavailable (no source answered)")
+    rc = sol.get("rugcheck") or {}
+    if rc.get("status") == "ok":
+        n_danger = sum(1 for x in rc.get("risks") or [] if x.get("level") == "danger")
+        n_warn = sum(1 for x in rc.get("risks") or [] if x.get("level") == "warn")
+        lines.append(f"RugCheck   score {rc.get('score')} (normalised {rc.get('score_normalised')}) · {n_danger} danger / {n_warn} warn risk(s)")
+    else:
+        lines.append("RugCheck   unavailable - no report answered")
+    gp = sol.get("goplus") or {}
+    if gp.get("status") == "ok":
+        def yn(v):
+            return "yes" if v else ("no" if v is False else "unknown")
+        lines.append(f"GoPlus     mintable: {yn(gp.get('mintable'))} · freezable: {yn(gp.get('freezable'))} · holders: {gp.get('holder_count') if gp.get('holder_count') is not None else 'unknown'}")
+    else:
+        lines.append("GoPlus     unavailable - no security data")
+    w = c.get("wallet") or {}
+    if r.get("wallet"):
+        holds = w.get("holds_ui")
+        lines.append(f"Wallet     {_short(r['wallet'], 8, 6)} · holds {holds if holds is not None else 'unknown'}")
+    lines.append("-" * _CARD_WIDTH)
+    lines.append(f"VERDICT    {r['verdict']}")
+    tag = {"block": "BLOCK", "caution": "WARN ", "info": " ok  "}
+    for reason in r["reasons"]:
+        lines.append(f"  [{tag.get(reason['level'], '?????')}] {reason['message']}")
+    lines.append("-" * _CARD_WIDTH)
+    lines.append(f"History    {r.get('identification_path')}")
+    slot = dep.get("slot")
+    lines.append(f"Time       {r.get('total_seconds')}s" + (f" · slot {slot}" if slot else ""))
+    lines.append("=" * _CARD_WIDTH)
+    return lines
+
+
 def render_text(r: dict) -> str:
     chain = r["chain"]
     lines = ["=" * _CARD_WIDTH,
@@ -49,6 +128,10 @@ def render_text(r: dict) -> str:
         for reason in r.get("reasons", []):
             lines.append(f"  - {reason['message']}")
         lines.append("=" * _CARD_WIDTH)
+        return "\n".join(lines)
+
+    if chain.get("key") == "solana":
+        lines.extend(_solana_card_lines(r))
         return "\n".join(lines)
 
     # A not-a-contract report legitimately carries only the sections
@@ -127,10 +210,10 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true", help="verify the built-in Keccak-256 and exit")
     sub = ap.add_subparsers(dest="cmd")
     ck = sub.add_parser("check", help="run a precheck on a contract address or project URL")
-    ck.add_argument("target", help="contract address (0x...) or project/mint page URL")
+    ck.add_argument("target", help="contract address (0x...) or project/mint page URL; a base58 mint address with --chain solana")
     ck.add_argument("--chain", default="bsc", choices=sorted(CHAINS), help="chain adapter (default: bsc)")
     ck.add_argument("--wallet", default=None,
-                    help="wallet to test eligibility/simulate from (default: zero address - eligibility results are wallet-specific, pass yours)")
+                    help="wallet to test eligibility/simulate from (0x... on EVM chains, base58 on Solana; default: zero address on EVM - eligibility results are wallet-specific, pass yours)")
     ck.add_argument("--library", default=None, help="path to an experience_library.jsonl")
     ck.add_argument("--json", action="store_true", help="print only the JSON verdict (schema preflight.verdict/1)")
     ck.add_argument("--out", default=None, help="also write the JSON verdict to this path")
@@ -146,10 +229,17 @@ def main(argv=None):
         ap.print_help()
         return 0
 
-    if args.wallet is not None and not ADDR_RE.fullmatch(args.wallet):
+    if args.wallet is not None:
         # A malformed wallet would silently degrade every eligibility
         # answer in the report - fail loudly before anything runs.
-        ap.error(f"--wallet must be a full address (0x + 40 hex chars), got {args.wallet!r}")
+        # The expected format follows the chain: 0x on EVM, base58 on
+        # Solana.
+        if args.chain == "solana":
+            if not is_solana_address(args.wallet):
+                ap.error(f"--wallet must be a Solana address (base58, 32-44 chars) "
+                         f"with --chain solana, got {args.wallet!r}")
+        elif not ADDR_RE.fullmatch(args.wallet):
+            ap.error(f"--wallet must be a full address (0x + 40 hex chars), got {args.wallet!r}")
 
     report, code = run_check(args.target, chain_key=args.chain,
                              wallet=args.wallet, library_path=args.library)

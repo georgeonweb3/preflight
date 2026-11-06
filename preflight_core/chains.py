@@ -9,6 +9,12 @@ BSC is first-class: the gas bands and probe behaviour were calibrated on
 it in production. Base ships as a second adapter because the probe logic
 generalises cleanly; its gas bands are NOT calibrated yet, so the gas
 module reports price without a band there rather than faking one.
+
+Solana is the exception that proves the rule: it is not an EVM chain,
+so it is an adapter entry here (kind="solana") plus its own pipeline
+(solana_check.py) - base58 mints, mint/freeze authorities and Token-2022
+extensions instead of eth_call probes, and RugCheck/GoPlus reports
+instead of Sourcify.
 """
 from dataclasses import dataclass, field
 
@@ -24,6 +30,12 @@ class Chain:
     coingecko_id: str             # price fallback id
     explorer_domains: tuple       # used to rank addresses found on a page
     gas_bands_calibrated: bool = False
+    # "evm" chains run the eth_call pipeline in check.py. "solana" is
+    # a different account model entirely (base58 mints, authorities
+    # instead of owner functions, no Sourcify/eth_call) and dispatches
+    # to solana_check.py; the fields above that only make sense for
+    # EVM (chain_id, Sourcify, gas bands) are inert for it.
+    kind: str = "evm"
 
 
 BSC = Chain(
@@ -60,4 +72,19 @@ BASE = Chain(
     gas_bands_calibrated=False,
 )
 
-CHAINS = {c.key: c for c in (BSC, BASE)}
+SOLANA = Chain(
+    key="solana",
+    name="Solana",
+    chain_id=None,  # no EVM chain id; Solana is not an EVM chain
+    rpcs=(
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-rpc.publicnode.com",
+    ),
+    native_symbol="SOL",
+    price_symbol="SOLUSDT",
+    coingecko_id="solana",
+    explorer_domains=("solscan.io",),
+    kind="solana",
+)
+
+CHAINS = {c.key: c for c in (BSC, BASE, SOLANA)}
