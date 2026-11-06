@@ -18,6 +18,13 @@ Uses the Sourcify API v2 only. (The v1 check-by-addresses endpoint was
 removed upstream - it returns a 404 removal notice - so there is no v1
 fallback to lean on. v2 semantics: 200 with match fields for verified
 contracts, 404 with null match fields for everything else.)
+
+The mapping is deliberately strict, because the verdict escalates on
+"none" but not on "unknown": a 200 only counts when its match value is
+in the known vocabulary, and a 404 only counts as "none" when the body
+positively carries null match fields. Any other shape is unrecognised
+and the caller reports "unknown" - "we could not check" must never
+harden into "definitely unverified".
 """
 import json
 import urllib.error
@@ -34,22 +41,30 @@ def interpret(status_code, body):
     """
     if not isinstance(body, dict):
         return None
-    match = body.get("match") or body.get("runtimeMatch") or body.get("creationMatch")
     if status_code == 200:
+        match = body.get("match") or body.get("runtimeMatch") or body.get("creationMatch")
         if match in ("exact_match", "perfect"):
             return "exact_match", "Sourcify v2: exact match"
         if match in ("partial_match", "partial"):
             return "partial_match", "Sourcify v2: partial match"
-        if match:
-            return "exact_match", f"Sourcify v2 match: {match}"
+        # Any other 200 (no match value, or a value outside the known
+        # vocabulary) is unrecognisable - never promote it to a match.
         return None
     if status_code == 404:
         # v2 answers unknown/unverified contracts with a 404 whose body
-        # still names the chain and address and carries null match fields.
-        if match is None and (body.get("chainId") is not None or body.get("address") is not None
-                              or "match" in body):
+        # still names the chain and address and carries null match
+        # fields. "none" requires that positive evidence: at least one
+        # match field present, every match field null, and the body
+        # naming the chain or address it is answering for. A bare or
+        # foreign-shaped 404 (an error page, a removal notice) carries
+        # no such evidence and stays unrecognised -> "unknown".
+        match_keys = ("match", "runtimeMatch", "creationMatch")
+        named = body.get("chainId") is not None or body.get("address") is not None
+        has_match_field = any(k in body for k in match_keys)
+        all_null = all(body.get(k) is None for k in match_keys)
+        if named and has_match_field and all_null:
             return "none", "Sourcify v2: no verified match (404)"
-        return "none", "Sourcify v2: contract not found (404)"
+        return None
     return None
 
 

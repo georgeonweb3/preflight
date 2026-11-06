@@ -104,7 +104,8 @@ def run_check(target, chain_key="bsc", wallet=None, library_path=None):
 
     # Experience library: a hint layer, never a substitute for live checks.
     timer.start("library_match")
-    matches = match_library(load_library(library_path), contract, selectors)
+    matches = match_library(load_library(library_path), contract, selectors,
+                            chain=chain.key)
     report["library_matches"] = matches
     best = matches[0] if matches else None
     report["identification_path"] = (

@@ -8,6 +8,13 @@ The rule from the parent skill stands: history is a hint, never a
 substitute. A match changes what we tell the user ("this shape failed
 before, here is why") - it never skips a live check, and addresses,
 prices and parameters are always re-verified in the same run.
+
+Exact-contract matching is chain-scoped: entries record a chain, and
+the same address on a different chain (common with deterministic
+deployers) is a different contract with a different history. ABI-shape
+matching stays chain-agnostic - a selector shape means the same thing
+on any EVM chain - but a cross-chain address twin can only ever
+surface as a shape match, never as this contract's own history.
 """
 import json
 from pathlib import Path
@@ -29,11 +36,18 @@ def load_library(path=None):
     return entries
 
 
-def match_library(entries, contract, selector_set):
-    """Up to 3 matches: exact contract, then selector-set similarity >= 0.25."""
+def match_library(entries, contract, selector_set, chain=None):
+    """Up to 3 matches: exact contract (same chain), then selector-set
+    similarity >= 0.25. `chain` is the chain key being checked (e.g.
+    "bsc"); when an entry records a different chain, its exact-contract
+    history does not transfer - it may still shape-match. Entries that
+    record no chain cannot be scoped and match as before."""
     out = []
+    want_chain = (chain or "").strip().lower() or None
     for e in entries:
-        if e.get("contract") and contract and e["contract"].lower() == contract.lower():
+        entry_chain = (e.get("chain") or "").strip().lower() or None
+        same_chain = want_chain is None or entry_chain is None or entry_chain == want_chain
+        if same_chain and e.get("contract") and contract and e["contract"].lower() == contract.lower():
             out.append({"project": e.get("project"), "similarity": 1.0,
                         "match_type": "exact_contract", "outcome": e.get("outcome"),
                         "failure_reason": e.get("failure_reason"),

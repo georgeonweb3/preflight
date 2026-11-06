@@ -65,20 +65,32 @@ signing. Nobody assembles it into one answer. Preflight does.
 - **Simulation** (`probes.py`): every known mint/claim function found
   in the bytecode is eth_call'd from the check wallet, first at value
   0 and, when a price was probed, again at value = price. Revert
-  reasons are captured verbatim. This is a simulation only; nothing
-  is signed or broadcast, ever.
+  reasons are captured verbatim. Each attempt records one of three
+  outcomes: success, revert (the contract answered and refused), or
+  error (every RPC endpoint failed at the transport level, so the
+  contract never answered). An error is evidence about the network,
+  not about the contract: the verdict surfaces it as a caution
+  (SIMULATION_UNKNOWN) and never lets it feed a block. This is a
+  simulation only; nothing is signed or broadcast, ever.
 - **Verification** (`sourcify.py`): Sourcify API v2 match status
   (exact_match / partial_match / none / unknown). "unknown" (Sourcify
   unreachable) is kept distinct from "none" (no match) because they
-  mean different things and the verdict treats them differently.
+  mean different things and the verdict treats them differently. The
+  mapping is strict: a 200 only counts when its match value is in the
+  known vocabulary, and a 404 only counts as "none" when the body
+  positively carries null match fields - anything unrecognised is
+  "unknown", so "could not check" can never harden into "definitely
+  unverified".
 - **Gas** (`gas.py`): median eth_gasPrice across endpoints, BSC band
   (CHEAP / NORMAL / EXPENSIVE / VERY_EXPENSIVE), rolling 24h local
   baseline, native-token USD price, and an eth_estimateGas cost for
   the exact mint call when a simulation succeeded.
 - **Experience library** (`library.py`): past outcomes as JSONL,
   matched exact-contract first, then by ABI shape (Jaccard over the
-  selector fingerprint). A match surfaces history ("this shape failed
-  before, here is why") but never skips a live check.
+  selector fingerprint). Exact-contract matching is chain-scoped: the
+  same address on a different chain is a different contract and does
+  not inherit this chain's history. A match surfaces history ("this
+  shape failed before, here is why") but never skips a live check.
 - **Verdict engine** (`verdict.py`): a pure function from checks to
   verdict + itemised reasons. Deterministic and unit-tested.
 
@@ -100,8 +112,9 @@ no successful simulation; source unverified AND simulation reverting.
 Caution rules include: unverified or unchecked source, upgradeable
 proxy, any price above zero (amount shown), disagreeing price probes,
 unknown price, no known mint function (commit/reveal shapes), open
-status unconfirmed, expensive gas, whitelist answering false, a
-matching past failure in the experience library.
+status unconfirmed, simulation not completed (RPC/transport failure),
+expensive gas, whitelist answering false, a matching past failure in
+the experience library (exact contract or matching ABI shape).
 
 ### The three doors
 

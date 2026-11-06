@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "preflight"
-version = "0.1.0"
+version = "0.1.1"
 description = "Check before you sign: a read-only precheck for mint and claim contracts, with a CLEAR / CAUTION / BLOCKED verdict."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -17,11 +17,20 @@ Rule sources, all learned the expensive way in production (2026-11-03/04):
 - gas can spike 4x intraday (BBF batch) -> expensive gas is a caution
   with the band named.
 """
+import re
 from decimal import Decimal
 
 
 def _r(code, level, message):
     return {"code": code, "level": level, "message": message}
+
+
+def _outcome_is_success(outcome):
+    """Classify an experience-library outcome by whole tokens, never by
+    substring: "success_free_mint_executed" is a success, "unsuccessful"
+    is not (a substring test cannot tell those apart)."""
+    tokens = set(re.split(r"[^a-z0-9]+", (outcome or "").lower()))
+    return bool(tokens & {"success", "executed"})
 
 
 def evaluate(checks: dict, verification: dict, library_matches: list, gas_snapshot: dict):
@@ -48,7 +57,11 @@ def evaluate(checks: dict, verification: dict, library_matches: list, gas_snapsh
         reasons.append(_r("PAUSED", "block", "contract is paused"))
 
     attempts = sim.get("attempts") or []
-    sim_all_reverted = bool(attempts) and not sim.get("any_success")
+    # Only genuine reverts count. An attempt that ended in a transport
+    # error says nothing about the contract, so it can neither satisfy
+    # nor soften this block - it surfaces as SIMULATION_UNKNOWN below.
+    sim_all_reverted = bool(attempts) and \
+        all(a.get("result") == "revert" for a in attempts)
     if sim_all_reverted:
         first = next((a for a in attempts if a.get("reason")), attempts[0])
         reasons.append(_r("SIMULATION_REVERTS", "block",
@@ -115,6 +128,15 @@ def evaluate(checks: dict, verification: dict, library_matches: list, gas_snapsh
     elif not attempts:
         reasons.append(_r("SIMULATION_NOT_POSSIBLE", "caution",
                           "mint functions exist but none could be simulated with standard arguments"))
+    sim_errors = [a for a in attempts if a.get("result") == "error"]
+    if sim_errors and not sim.get("any_success"):
+        first_err = sim_errors[0]
+        reasons.append(_r("SIMULATION_UNKNOWN", "caution",
+                          f"simulation could not be completed: {len(sim_errors)} of {len(attempts)} "
+                          f"eth_call attempt(s) failed at the transport level "
+                          f"(e.g. {first_err['function']}: {first_err.get('reason') or 'RPC unreachable'}). "
+                          "That is evidence about the network, not about this contract - "
+                          "re-run the check when the RPC path is healthy"))
     if not opens and sim.get("candidate_functions"):
         reasons.append(_r("OPEN_UNCONFIRMED", "caution",
                           "no open-status function answered - openness is inferred from the simulation only"))
@@ -152,7 +174,7 @@ def evaluate(checks: dict, verification: dict, library_matches: list, gas_snapsh
     for m in library_matches or []:
         outcome = (m.get("outcome") or "")
         if m.get("match_type") == "exact_contract":
-            if "success" in outcome or "executed" in outcome:
+            if _outcome_is_success(outcome):
                 reasons.append(_r("HISTORY_EXACT_SUCCESS", "info",
                                   f"this exact contract is in the experience library: {m.get('project')} - outcome {outcome}"))
             elif outcome:
@@ -160,8 +182,19 @@ def evaluate(checks: dict, verification: dict, library_matches: list, gas_snapsh
                                   f"this exact contract is in the experience library: {m.get('project')} - outcome {outcome}"
                                   + (f" ({m['failure_reason']})" if m.get("failure_reason") else "")))
         elif m.get("similarity", 0) >= 0.5:
-            reasons.append(_r("HISTORY_SHAPE_MATCH", "info",
-                              f"ABI shape matches '{m.get('project')}' (similarity {m.get('similarity')}) - identification path reused, everything still re-verified live"))
+            if outcome and not _outcome_is_success(outcome):
+                # The spec's caution rule is "a matching past failure in
+                # the experience library" - it is not limited to exact
+                # contract matches. A shape that failed before is a
+                # caution with the reason attached, not a neutral note.
+                reasons.append(_r("HISTORY_SHAPE_FAILURE", "caution",
+                                  f"ABI shape matches '{m.get('project')}' (similarity {m.get('similarity')}) "
+                                  f"and that shape failed before - outcome {outcome}"
+                                  + (f" ({m['failure_reason']})" if m.get("failure_reason") else "")
+                                  + " - everything still re-verified live, but read the live reasons with this in mind"))
+            else:
+                reasons.append(_r("HISTORY_SHAPE_MATCH", "info",
+                                  f"ABI shape matches '{m.get('project')}' (similarity {m.get('similarity')}) - identification path reused, everything still re-verified live"))
 
     # ---- roll up ---------------------------------------------------------
     levels = {r["level"] for r in reasons}

@@ -72,6 +72,49 @@ From `~/workspace/custom-skills/bsc-gas-guard/`:
    balanceOf. Fixed to "holds unknown"; example cards re-rendered
    from their saved JSON so text and JSON stay consistent.
 
+## Post-review fixes (v0.1.1, 2026-11-06)
+
+The two-axis code review of v0.1.0 (Matt Pocock `code-review` skill:
+Standards + Spec, plus a coordinator addendum) found one Critical and
+a cluster of same-family defects, all in the evidence pipeline: ways
+for "we could not check" to harden into block-grade evidence. Fixes
+1-4 below are the review's ranked fix list; 5-6 are the addendum
+items. Every fix ships with regression tests that fail on the v0.1.0
+behaviour (verified: 17 of the 21 new tests fail or error against the
+old code; the other 4 are guards that pass on both versions).
+
+1. **Transport failure is not a revert** (was Spec Critical).
+   `probes.py` recorded both RPC outcome kinds (`__revert__`,
+   `__error__`) as `result: "revert"`, so an RPC outage produced
+   SIMULATION_REVERTS and UNVERIFIED_AND_REVERTING blocks. Attempts
+   now record `result: "error"` for transport failures; the verdict
+   engine's revert blocks require every attempt to be a genuine
+   revert, and an incomplete simulation surfaces as the new
+   SIMULATION_UNKNOWN caution. `SPEC.md` documents the three-outcome
+   simulation evidence (success / revert / error).
+2. **`reveal(address)` removed from the mint candidates** (was Spec
+   High). Commit/reveal contracts were simulated on their reveal half
+   and predictably blocked; per the spec's own honesty rule they now
+   land on the NO_KNOWN_MINT_FUNCTION caution.
+3. **Sourcify classification is strict** (was Standards High / Spec
+   Medium). A 200 with a match value outside the known vocabulary is
+   unrecognised, and a 404 counts as "none" only when the body
+   positively carries null match fields (plus the chain/address it
+   answers for). Anything else is "unknown".
+4. **Shape-matched past failure is a caution** (was Spec Medium).
+   `verdict.py` emitted HISTORY_SHAPE_MATCH as info regardless of the
+   matched outcome; a shape match whose recorded outcome is a failure
+   now emits HISTORY_SHAPE_FAILURE (caution) with the failure reason,
+   per the spec's caution rule. Success shapes stay info.
+5. **Outcome classification is token-based** (addendum). Exact-history
+   classification used substring tests, so outcome "unsuccessful"
+   matched "success" and returned CLEAR. Classification now splits
+   the outcome into whole tokens (`_outcome_is_success`).
+6. **Library exact matching is chain-scoped** (addendum).
+   `match_library` takes the chain being checked; an entry recorded
+   on a different chain can no longer produce an exact-contract match
+   (it may still ABI-shape match). `check.py` passes the chain key.
+
 ## Cut from v1, and why
 
 - Library recording (`--record-outcome` in the skill): the library is
@@ -97,11 +140,15 @@ if it ever annoys.
 ## Test results
 
 - `python3 -m preflight_core.cli --selftest`: OK.
-- `python3 -m unittest discover -s tests`: 22 tests, OK (keccak
+- `python3 -m unittest discover -s tests`: 43 tests, OK (keccak
   vectors, input resolution, verdict rules incl. both historical
-  shapes, Sourcify response mapping, gas bands).
+  shapes, Sourcify response mapping, gas bands; v0.1.1 adds fake-RPC
+  probe tests, simulation-evidence tests, history classification
+  tests and library chain-scoping tests).
 - Live runs: see `examples/` (ACAT and JIAYOU, 2026-11-06), plus
-  URL-mode and UNRESOLVED_INPUT paths exercised live.
+  URL-mode and UNRESOLVED_INPUT paths exercised live. Both examples
+  re-run after the v0.1.1 fixes: verdicts unchanged (ACAT BLOCKED on
+  state with verified source; JIAYOU BLOCKED on trust).
 
 ## Remaining steps to publish (nothing here is done yet)
 

@@ -9,4 +9,4 @@ It never signs, never approves, never sends a transaction and never asks
 for a key. If it cannot resolve or verify something, it says so.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

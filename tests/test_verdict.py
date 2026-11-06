@@ -109,6 +109,84 @@ class TestVerdict(unittest.TestCase):
         self.assertIn("HISTORY_EXACT_FAILURE", codes(reasons))
 
 
+class TestSimulationEvidence(unittest.TestCase):
+    """Regression tests for the 2026-11-06 review's Critical finding:
+    a transport failure is not a revert and must never manufacture a
+    SIMULATION_REVERTS / UNVERIFIED_AND_REVERTING block."""
+
+    def _set_sim(self, checks, attempts):
+        checks["simulation"] = {
+            "attempts": attempts,
+            "candidate_functions": sorted({a["function"] for a in attempts}),
+            "any_success": any(a["result"] == "success" for a in attempts),
+            "free_success": False}
+
+    def test_all_error_attempts_are_caution_not_block(self):
+        checks = base_checks()
+        self._set_sim(checks, [{"function": "mint()", "value_wei": 0,
+                                "result": "error",
+                                "reason": "all endpoints unreachable"}])
+        verdict, reasons = evaluate(checks, {"status": "none"}, [], CHEAP_GAS)
+        self.assertEqual(verdict, "CAUTION")
+        self.assertIn("SIMULATION_UNKNOWN", codes(reasons))
+        self.assertNotIn("SIMULATION_REVERTS", codes(reasons))
+        self.assertNotIn("UNVERIFIED_AND_REVERTING", codes(reasons))
+
+    def test_mixed_revert_and_error_is_not_all_reverted(self):
+        checks = base_checks()
+        self._set_sim(checks, [
+            {"function": "mint()", "value_wei": 0, "result": "revert",
+             "reason": "execution reverted"},
+            {"function": "claim()", "value_wei": 0, "result": "error",
+             "reason": "endpoint timeout"},
+        ])
+        verdict, reasons = evaluate(checks, VERIFIED, [], CHEAP_GAS)
+        self.assertEqual(verdict, "CAUTION")
+        self.assertNotIn("SIMULATION_REVERTS", codes(reasons))
+        self.assertIn("SIMULATION_UNKNOWN", codes(reasons))
+
+
+class TestHistoryClassification(unittest.TestCase):
+    def test_unsuccessful_is_not_a_success(self):
+        # Regression (coordinator addendum): outcome classification was
+        # substring-based, so "unsuccessful" read as a success and an
+        # otherwise-clean check came back CLEAR.
+        matches = [{"project": "OldDrop", "similarity": 1.0,
+                    "match_type": "exact_contract", "outcome": "unsuccessful",
+                    "failure_reason": "mint reverted", "mint_method": None}]
+        verdict, reasons = evaluate(base_checks(), VERIFIED, matches, CHEAP_GAS)
+        self.assertEqual(verdict, "CAUTION")
+        self.assertIn("HISTORY_EXACT_FAILURE", codes(reasons))
+        self.assertNotIn("HISTORY_EXACT_SUCCESS", codes(reasons))
+
+    def test_success_outcome_tokens_still_info(self):
+        matches = [{"project": "ACAT", "similarity": 1.0,
+                    "match_type": "exact_contract",
+                    "outcome": "success_free_mint_executed",
+                    "failure_reason": None, "mint_method": None}]
+        verdict, reasons = evaluate(base_checks(), VERIFIED, matches, CHEAP_GAS)
+        self.assertEqual(verdict, "CLEAR")
+        self.assertIn("HISTORY_EXACT_SUCCESS", codes(reasons))
+
+    def test_shape_match_failure_is_caution(self):
+        # Spec fix: the caution rule is "a matching past failure in the
+        # experience library" - not limited to exact contract matches.
+        matches = [{"project": "BLOB-like", "similarity": 0.8,
+                    "match_type": "abi_shape", "outcome": "sold_out",
+                    "failure_reason": "supply exhausted", "mint_method": None}]
+        verdict, reasons = evaluate(base_checks(), VERIFIED, matches, CHEAP_GAS)
+        self.assertEqual(verdict, "CAUTION")
+        self.assertIn("HISTORY_SHAPE_FAILURE", codes(reasons))
+
+    def test_shape_match_success_stays_info(self):
+        matches = [{"project": "AGENT MAO-like", "similarity": 0.9,
+                    "match_type": "abi_shape", "outcome": "success_user_minted",
+                    "failure_reason": None, "mint_method": None}]
+        verdict, reasons = evaluate(base_checks(), VERIFIED, matches, CHEAP_GAS)
+        self.assertEqual(verdict, "CLEAR")
+        self.assertIn("HISTORY_SHAPE_MATCH", codes(reasons))
+
+
 class TestGasHelpers(unittest.TestCase):
     def test_bands(self):
         self.assertEqual(band_for(0.08), "CHEAP")

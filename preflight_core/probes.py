@@ -52,10 +52,10 @@ MINT_CANDIDATES = [
     "freeMint(uint256)", "publicMint(uint256)", "publicMint()",
     "claim()", "claim(uint256)", "claim(address)", "mintNFT(uint256)",
     "buy(uint256)", "mintToken(uint256)", "mintPublic(uint256)",
-    # commit/reveal shapes (e.g. Agent Periodic Lab): the reveal half is a
-    # standard-shape call; the commit half is often a project-specific
-    # no-arg selector only the official guide documents.
-    "reveal(address)",
+    # Deliberately NO commit/reveal shapes (e.g. reveal(address)): those
+    # flows are project-specific, so the honest answer is the
+    # NO_KNOWN_MINT_FUNCTION caution, not a simulation of a half-flow
+    # whose revert would be misread as a property of the contract.
 ]
 ALL_SIGS = sorted(set(
     [s for _, s, _ in VIEW_PROBES] + PRICE_FUNCS + OPEN_FUNCS +
@@ -293,11 +293,19 @@ def probe_contract(rpc, contract: str, wallet: str = None) -> dict:
             except Exception as e:
                 res = {"__error__": str(e)}
             if isinstance(res, dict):
+                # A deterministic revert is an answer about the contract;
+                # a transport error is an answer about the network. They
+                # must never share a result value: the verdict engine
+                # blocks on reverts but treats errors as "could not check".
+                if "__revert__" in res:
+                    result, reason = "revert", res.get("__revert__") or ""
+                else:
+                    result, reason = "error", res.get("__error__") or ""
                 sims.append({
                     "function": sig, "value_native": wei_to_native(val),
                     "value_wei": val, "calldata": data,
-                    "result": "revert",
-                    "reason": (res.get("__revert__") or res.get("__error__") or "")[:200],
+                    "result": result,
+                    "reason": reason[:200],
                 })
             else:
                 sims.append({
@@ -311,5 +319,7 @@ def probe_contract(rpc, contract: str, wallet: str = None) -> dict:
         "candidate_functions": candidates,
         "any_success": any(s["result"] == "success" for s in sims),
         "free_success": any(s["result"] == "success" and s["value_wei"] == 0 for s in sims),
+        "any_revert": any(s["result"] == "revert" for s in sims),
+        "any_error": any(s["result"] == "error" for s in sims),
     }
     return checks
